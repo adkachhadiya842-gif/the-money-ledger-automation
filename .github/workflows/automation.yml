@@ -11,6 +11,9 @@ jobs:
   generate:
     runs-on: ubuntu-latest
 
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
     steps:
       - name: Download project files
         uses: actions/checkout@v7
