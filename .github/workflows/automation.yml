@@ -1,0 +1,30 @@
+
+name: The Money Ledger Automation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download project files
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Create documentary script
+        run: python scripts/generate_script.py
+
+      - name: Save generated script
+        uses: actions/upload-artifact@v7
+        with:
+          name: money-ledger-script
+          path: output/script.txt
