@@ -70,7 +70,7 @@ Finish with a section called FACT-CHECK NOTES.
 
 print("Connecting to Gemini AI...")
 
-response = client.interactions.create(
+response = client.models.generate_content(
     model="gemini-3.8-flash",
     input=prompt
 )
