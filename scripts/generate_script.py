@@ -70,12 +70,14 @@ Finish with a section called FACT-CHECK NOTES.
 
 print("Connecting to Gemini AI...")
 
+
 response = client.models.generate_content(
     model="gemini-3.8-flash",
-    input=prompt
+    contents=prompt
 )
 
-script = response.output_text
+script = response.text
+
 
 if not script or not script.strip():
     raise ValueError("Gemini returned an empty script!")
