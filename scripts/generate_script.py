@@ -129,7 +129,13 @@ def generate_with_openrouter():
             f"OpenRouter API error {error.code}: {details}"
         )
 
+    print("DEBUG: OpenRouter response:")
+    print(json.dumps(result, indent=2)[:5000])
+
     choices = result.get("choices", [])
+
+    if not choices:
+        raise ValueError(f"OpenRouter returned no choices: {result}")
 
     if not choices:
         raise ValueError(f"OpenRouter returned no choices: {result}")
