@@ -1,16 +1,18 @@
 
 import os
+import json
+import urllib.request
+import urllib.error
 from pathlib import Path
 from google import genai
 
-# Read API key securely from GitHub Secrets
-api_key = os.environ.get("GEMINI_API_KEY")
-
-if not api_key:
-    raise ValueError("GEMINI_API_KEY is missing in GitHub Secrets!")
+# API keys from GitHub Secrets
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
 # Read first topic
 topics_file = Path("content/topics.txt")
+
 topics = [
     line.strip()
     for line in topics_file.read_text(encoding="utf-8").splitlines()
@@ -22,9 +24,7 @@ if not topics:
 
 topic = topics[0]
 
-# Connect to Gemini
-client = genai.Client(api_key=api_key)
-
+# Documentary prompt
 prompt = f"""
 You are the lead documentary scriptwriter for THE MONEY LEDGER,
 a premium American financial documentary YouTube channel.
@@ -68,23 +68,116 @@ Give the title first, then the complete narration script.
 Finish with a section called FACT-CHECK NOTES.
 """
 
-print("Connecting to Gemini AI...")
+
+def generate_with_gemini():
+    if not GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY missing")
+
+    print("Trying Gemini AI...")
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
+    response = client.models.generate_content(
+        model="gemini-3.5-flash-lite",
+        contents=prompt
+    )
+
+    if not response.text or not response.text.strip():
+        raise ValueError("Gemini returned empty script")
+
+    return response.text
 
 
-response = client.models.generate_content(
-    model="gemini-3.5-flash-lite",
-    contents=prompt
-)
+def generate_with_openrouter():
+    if not OPENROUTER_API_KEY:
+        raise ValueError("OPENROUTER_API_KEY missing")
 
-script = response.text
+    print("Gemini unavailable. Switching to OpenRouter FREE model...")
+
+    url = "https://openrouter.ai/api/v1/chat/completions"
+
+    payload = {
+        "model": "openrouter/free",
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": 0.7,
+        "max_tokens": 6000
+    }
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "X-Title": "The Money Ledger"
+        },
+        method="POST"
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=240) as response:
+            result = json.loads(response.read().decode("utf-8"))
+
+    except urllib.error.HTTPError as error:
+        details = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"OpenRouter API error {error.code}: {details}"
+        )
+
+    choices = result.get("choices", [])
+
+    if not choices:
+        raise ValueError(f"OpenRouter returned no choices: {result}")
+
+    content = choices[0].get("message", {}).get("content")
+
+    if isinstance(content, list):
+        content = "\n".join(
+            item.get("text", "")
+            for item in content
+            if isinstance(item, dict)
+        )
+
+    if not content or not content.strip():
+        raise ValueError("OpenRouter returned empty script")
+
+    print("OpenRouter model used:", result.get("model", "Unknown"))
+
+    return content
 
 
-if not script or not script.strip():
-    raise ValueError("Gemini returned an empty script!")
+# Primary + automatic backup
+print("Starting THE MONEY LEDGER script generation...")
 
+try:
+    script = generate_with_gemini()
+    print("SUCCESS: Script generated using Gemini!")
+
+except Exception as gemini_error:
+    print("Gemini failed:", str(gemini_error))
+    print("Activating backup provider...")
+
+    try:
+        script = generate_with_openrouter()
+        print("SUCCESS: Script generated using OpenRouter!")
+
+    except Exception as openrouter_error:
+        raise RuntimeError(
+            "Both AI providers failed.\n"
+            f"Gemini: {gemini_error}\n"
+            f"OpenRouter: {openrouter_error}"
+        )
+
+# Save output
 output_file = Path("output/script.txt")
 output_file.parent.mkdir(parents=True, exist_ok=True)
+
 output_file.write_text(script, encoding="utf-8")
 
-print("SUCCESS: AI documentary script generated!")
+print("DOCUMENTARY SCRIPT READY!")
 print("Output:", output_file)
