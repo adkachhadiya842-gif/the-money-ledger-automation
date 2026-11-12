@@ -4,13 +4,19 @@ import re
 import json
 import base64
 import wave
+import struct
+import time
 import urllib.request
 import urllib.error
 from pathlib import Path
 
-API_KEY = os.environ["GEMINI_API_KEY"]
+# API key from GitHub Secrets
+API_KEY = os.environ.get("GEMINI_API_KEY")
 
-MODEL = "gemini-3.1-flash-tts-preview"
+if not API_KEY:
+    raise ValueError("GEMINI_API_KEY missing in GitHub Secrets!")
+
+MODEL = "gemini-2.5-flash-preview-tts"
 VOICE = "Gacrux"
 
 INPUT_FILE = Path("output/script.txt")
@@ -39,7 +45,9 @@ def clean_script(text):
             continue
 
         line = re.sub(r"\*\*(.*?)\*\*", r"\1", line)
-        line = re.sub(r"^\*\*NARRATOR:\*\*\s*", "", line, flags=re.I)
+        line = re.sub(
+            r"^\*\*NARRATOR:\*\*\s*", "", line, flags=re.I
+        )
         line = re.sub(r"^NARRATOR:\s*", "", line, flags=re.I)
 
         lines.append(line)
@@ -75,10 +83,11 @@ def generate_audio(chunk):
         "contents": [{
             "parts": [{
                 "text": (
-                    "Say in a mature, deep, authoritative "
-                    "American English financial documentary "
-                    "narrator voice. Use calm cinematic storytelling "
-                    "and natural pauses. Read only this transcript:\n\n"
+                    "Read the following text in a mature, deep, "
+                    "authoritative American English financial "
+                    "documentary narration style. Speak calmly, "
+                    "clearly, and naturally with suitable pauses. "
+                    "Read only the supplied narration:\n\n"
                     + chunk
                 )
             }]
@@ -112,65 +121,102 @@ def generate_audio(chunk):
     except urllib.error.HTTPError as error:
         details = error.read().decode("utf-8", errors="replace")
         raise RuntimeError(
-            f"Google TTS API error {error.code}: {details}"
+            f"Gemini TTS API error {error.code}: {details}"
         )
 
+    print("DEBUG: Response keys:", list(result.keys()))
+
     for candidate in result.get("candidates", []):
+        print("DEBUG: Finish reason:", candidate.get("finishReason"))
+
         for part in candidate.get("content", {}).get("parts", []):
-            inline = part.get("inlineData")
+            print("DEBUG: Part keys:", list(part.keys()))
+
+            inline = part.get("inlineData") or part.get("inline_data")
 
             if inline and inline.get("data"):
-                return base64.b64decode(inline["data"])
+                audio_data = base64.b64decode(inline["data"])
+                mime_type = inline.get("mimeType", "")
+                print("Audio MIME:", mime_type)
+                return audio_data, mime_type
 
-    
-print("DEBUG: Response keys:", list(result.keys()))
-print("DEBUG: Prompt feedback:", result.get("promptFeedback"))
-
-for index, candidate in enumerate(result.get("candidates", [])):
-    print("DEBUG: Candidate:", index)
-    print("DEBUG: Finish reason:", candidate.get("finishReason"))
-
-    for part in candidate.get("content", {}).get("parts", []):
-        print("DEBUG: Part keys:", list(part.keys()))
-
-        if "text" in part:
-            print("DEBUG: Text response:", part["text"][:500])
-
-        if "inlineData" in part:
-            inline = part["inlineData"]
-            print("DEBUG: Audio MIME:", inline.get("mimeType"))
-            print("DEBUG: Audio data present:", bool(inline.get("data")))
-
-raise RuntimeError("Diagnostic complete - audio data not found")
+    print("DEBUG: Prompt feedback:", result.get("promptFeedback"))
+    raise RuntimeError(
+        "Gemini returned no audio data. Check model access and API response."
+    )
 
 
+def pcm_to_wav(audio_parts, mime_types):
+    combined = b"".join(audio_parts)
 
-if not INPUT_FILE.exists():
-    raise FileNotFoundError("output/script.txt not found")
+    # Gemini TTS normally returns raw PCM audio.
+    # Default output format: 24 kHz, mono, 16-bit PCM.
+    sample_rate = 24000
+    channels = 1
+    sample_width = 2
 
-script = clean_script(
-    INPUT_FILE.read_text(encoding="utf-8")
-)
+    for mime in mime_types:
+        match = re.search(r"rate=(\d+)", mime or "")
+        if match:
+            sample_rate = int(match.group(1))
+            break
 
-if not script:
-    raise ValueError("No narration text found")
+    # Remove incomplete final PCM sample if necessary.
+    combined = combined[:len(combined) - (len(combined) % 2)]
 
-chunks = make_chunks(script)
-audio_parts = []
+    if not combined:
+        raise ValueError("No valid PCM audio received!")
 
-for i, chunk in enumerate(chunks, 1):
-    print(f"Generating voice {i}/{len(chunks)}")
-    audio_parts.append(generate_audio(chunk))
+    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(OUTPUT_FILE), "wb") as wav:
+        wav.setnchannels(channels)
+        wav.setsampwidth(sample_width)
+        wav.setframerate(sample_rate)
+        wav.writeframes(combined)
 
-with wave.open(str(OUTPUT_FILE), "wb") as wav:
-    wav.setnchannels(1)
-    wav.setsampwidth(2)
-    wav.setframerate(24000)
 
-    for part in audio_parts:
-        wav.writeframes(part)
+def main():
+    if not INPUT_FILE.exists():
+        raise FileNotFoundError("output/script.txt not found!")
 
-print("SUCCESS: Voiceover created!")
-print(OUTPUT_FILE)
+    script = clean_script(
+        INPUT_FILE.read_text(encoding="utf-8")
+    )
+
+    if not script:
+        raise ValueError("No narration text found!")
+
+    chunks = make_chunks(script)
+
+    print("Total narration chunks:", len(chunks))
+
+    audio_parts = []
+    mime_types = []
+
+    for index, chunk in enumerate(chunks, 1):
+        print(f"Generating voice {index}/{len(chunks)}")
+
+        for attempt in range(1, 4):
+            try:
+                audio_data, mime_type = generate_audio(chunk)
+                audio_parts.append(audio_data)
+                mime_types.append(mime_type)
+                break
+
+            except Exception as error:
+                print(f"Attempt {attempt} failed:", error)
+
+                if attempt == 3:
+                    raise
+
+                time.sleep(attempt * 5)
+
+    pcm_to_wav(audio_parts, mime_types)
+
+    print("SUCCESS: Voiceover created!")
+    print("Output:", OUTPUT_FILE)
+
+
+if __name__ == "__main__":
+    main()
