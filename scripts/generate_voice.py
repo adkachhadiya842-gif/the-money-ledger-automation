@@ -4,13 +4,12 @@ import re
 import json
 import base64
 import wave
-import struct
 import time
 import urllib.request
 import urllib.error
 from pathlib import Path
+from hashlib import sha256
 
-# API key from GitHub Secrets
 API_KEY = os.environ.get("GEMINI_API_KEY")
 
 if not API_KEY:
@@ -21,6 +20,12 @@ VOICE = "Gacrux"
 
 INPUT_FILE = Path("output/script.txt")
 OUTPUT_FILE = Path("output/voiceover.wav")
+CHUNKS_DIR = Path("output/tts_chunks")
+MANIFEST_FILE = CHUNKS_DIR / "manifest.json"
+
+
+class QuotaExceededError(RuntimeError):
+    pass
 
 
 def clean_script(text):
@@ -120,40 +125,44 @@ def generate_audio(chunk):
 
     except urllib.error.HTTPError as error:
         details = error.read().decode("utf-8", errors="replace")
+
+        if error.code == 429:
+            raise QuotaExceededError(
+                "Gemini daily quota/rate limit reached. "
+                "Completed chunks have been saved. "
+                "Wait for quota reset before rerunning."
+            )
+
         raise RuntimeError(
             f"Gemini TTS API error {error.code}: {details}"
         )
 
-    print("DEBUG: Response keys:", list(result.keys()))
-
     for candidate in result.get("candidates", []):
-        print("DEBUG: Finish reason:", candidate.get("finishReason"))
-
         for part in candidate.get("content", {}).get("parts", []):
-            print("DEBUG: Part keys:", list(part.keys()))
-
             inline = part.get("inlineData") or part.get("inline_data")
 
             if inline and inline.get("data"):
                 audio_data = base64.b64decode(inline["data"])
-                mime_type = inline.get("mimeType", "")
-                print("Audio MIME:", mime_type)
+                mime_type = (
+                    inline.get("mimeType")
+                    or inline.get("mime_type")
+                    or ""
+                )
                 return audio_data, mime_type
 
-    print("DEBUG: Prompt feedback:", result.get("promptFeedback"))
-    raise RuntimeError(
-        "Gemini returned no audio data. Check model access and API response."
-    )
+    raise RuntimeError("Gemini returned no audio data.")
+
+
+def save_manifest(data):
+    temp = MANIFEST_FILE.with_suffix(".tmp")
+    temp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    temp.replace(MANIFEST_FILE)
 
 
 def pcm_to_wav(audio_parts, mime_types):
     combined = b"".join(audio_parts)
 
-    # Gemini TTS normally returns raw PCM audio.
-    # Default output format: 24 kHz, mono, 16-bit PCM.
     sample_rate = 24000
-    channels = 1
-    sample_width = 2
 
     for mime in mime_types:
         match = re.search(r"rate=(\d+)", mime or "")
@@ -161,7 +170,6 @@ def pcm_to_wav(audio_parts, mime_types):
             sample_rate = int(match.group(1))
             break
 
-    # Remove incomplete final PCM sample if necessary.
     combined = combined[:len(combined) - (len(combined) % 2)]
 
     if not combined:
@@ -170,8 +178,8 @@ def pcm_to_wav(audio_parts, mime_types):
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     with wave.open(str(OUTPUT_FILE), "wb") as wav:
-        wav.setnchannels(channels)
-        wav.setsampwidth(sample_width)
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
         wav.setframerate(sample_rate)
         wav.writeframes(combined)
 
@@ -180,37 +188,96 @@ def main():
     if not INPUT_FILE.exists():
         raise FileNotFoundError("output/script.txt not found!")
 
-    script = clean_script(
-        INPUT_FILE.read_text(encoding="utf-8")
-    )
+    script = clean_script(INPUT_FILE.read_text(encoding="utf-8"))
 
     if not script:
         raise ValueError("No narration text found!")
 
     chunks = make_chunks(script)
+    script_hash = sha256(script.encode("utf-8")).hexdigest()
+
+    CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if MANIFEST_FILE.exists():
+        manifest = json.loads(
+            MANIFEST_FILE.read_text(encoding="utf-8")
+        )
+    else:
+        manifest = {}
+
+    # Reset checkpoints if the narration script has changed.
+    if (
+        manifest.get("script_hash") != script_hash
+        or manifest.get("total_chunks") != len(chunks)
+    ):
+        print("New script detected. Starting fresh checkpoints.")
+
+        for file in CHUNKS_DIR.glob("chunk_*.pcm"):
+            file.unlink()
+
+        manifest = {
+            "script_hash": script_hash,
+            "total_chunks": len(chunks),
+            "completed": {}
+        }
+
+        save_manifest(manifest)
 
     print("Total narration chunks:", len(chunks))
 
-    audio_parts = []
-    mime_types = []
-
     for index, chunk in enumerate(chunks, 1):
+        chunk_key = str(index)
+        chunk_file = CHUNKS_DIR / f"chunk_{index:03d}.pcm"
+
+        if (
+            chunk_key in manifest["completed"]
+            and chunk_file.exists()
+        ):
+            print(f"Skipping completed chunk {index}/{len(chunks)}")
+            continue
+
         print(f"Generating voice {index}/{len(chunks)}")
 
         for attempt in range(1, 4):
             try:
                 audio_data, mime_type = generate_audio(chunk)
-                audio_parts.append(audio_data)
-                mime_types.append(mime_type)
+
+                # Save audio immediately after successful generation.
+                temp_file = chunk_file.with_suffix(".tmp")
+                temp_file.write_bytes(audio_data)
+                temp_file.replace(chunk_file)
+
+                manifest["completed"][chunk_key] = mime_type
+                save_manifest(manifest)
+
+                print(f"Saved chunk {index}")
                 break
 
+            except QuotaExceededError:
+                print("Quota reached. Stopping without retry.")
+                raise
+
             except Exception as error:
-                print(f"Attempt {attempt} failed:", error)
+                print(f"Attempt {attempt} failed: {error}")
 
                 if attempt == 3:
                     raise
 
                 time.sleep(attempt * 5)
+
+    # Join all saved chunks in the correct order.
+    audio_parts = []
+    mime_types = []
+
+    for index in range(1, len(chunks) + 1):
+        chunk_key = str(index)
+        chunk_file = CHUNKS_DIR / f"chunk_{index:03d}.pcm"
+
+        if not chunk_file.exists():
+            raise RuntimeError(f"Missing audio chunk: {index}")
+
+        audio_parts.append(chunk_file.read_bytes())
+        mime_types.append(manifest["completed"].get(chunk_key, ""))
 
     pcm_to_wav(audio_parts, mime_types)
 
