@@ -1,65 +1,61 @@
 
 import os
 import re
-import wave
 import base64
+import wave
+from io import BytesIO
 from pathlib import Path
 from google import genai
 
-API_KEY = os.environ.get("GEMINI_API_KEY")
-
-if not API_KEY:
-    raise ValueError("GEMINI_API_KEY secret is missing")
-
-client = genai.Client(api_key=API_KEY)
+client = genai.Client(
+    api_key=os.environ["GEMINI_API_KEY"]
+)
 
 INPUT_FILE = Path("output/script.txt")
 OUTPUT_FILE = Path("output/voiceover.wav")
 
 def clean_script(text):
-    lines = []
+    result = []
 
     for line in text.splitlines():
-        stripped = line.strip()
+        line = line.strip()
 
-        if not stripped:
-            lines.append("")
+        if not line:
             continue
 
-        # Remove visual and production directions
         if re.match(
             r"^(visual|b-roll|on-screen|fact-check|fact check|"
             r"editor note|source note|graphics|music|sound effect)\s*:",
-            stripped,
-            re.IGNORECASE
+            line,
+            re.I
         ):
             continue
 
-        if stripped.startswith("[VISUAL") or stripped.startswith("[B-ROLL"):
+        if line.startswith("[VISUAL") or line.startswith("[B-ROLL"):
             continue
 
-        if stripped.startswith("##"):
+        if line.startswith("#"):
             continue
 
-        stripped = re.sub(r"^\*\*NARRATOR:\*\*\s*", "", stripped, flags=re.I)
-        stripped = re.sub(r"^NARRATOR:\s*", "", stripped, flags=re.I)
-        stripped = re.sub(r"\*\*(.*?)\*\*", r"\1", stripped)
+        line = re.sub(r"\*\*(.*?)\*\*", r"\1", line)
+        line = re.sub(r"^\*\*NARRATOR:\*\*\s*", "", line, flags=re.I)
+        line = re.sub(r"^NARRATOR:\s*", "", line, flags=re.I)
 
-        lines.append(stripped)
+        result.append(line)
 
-    return "\n".join(lines).strip()
+    return "\n".join(result)
 
 def make_chunks(text, limit=2500):
-    paragraphs = text.split("\n")
+    sentences = re.split(r'(?<=[.!?])\s+', text)
     chunks = []
     current = ""
 
-    for paragraph in paragraphs:
-        if len(current) + len(paragraph) > limit and current:
+    for sentence in sentences:
+        if len(current) + len(sentence) > limit and current:
             chunks.append(current.strip())
             current = ""
 
-        current += paragraph + "\n"
+        current += sentence + " "
 
     if current.strip():
         chunks.append(current.strip())
@@ -69,45 +65,64 @@ def make_chunks(text, limit=2500):
 if not INPUT_FILE.exists():
     raise FileNotFoundError("output/script.txt not found")
 
-script = clean_script(INPUT_FILE.read_text(encoding="utf-8"))
+script = clean_script(
+    INPUT_FILE.read_text(encoding="utf-8")
+)
 
 if not script:
-    raise ValueError("No narration text found in script")
+    raise ValueError("No narration text found")
 
 chunks = make_chunks(script)
-audio_parts = []
+audio_frames = []
 
-for index, chunk in enumerate(chunks, start=1):
-    print(f"Generating voice part {index}/{len(chunks)}")
+for i, chunk in enumerate(chunks, 1):
+    print(f"Generating voice {i}/{len(chunks)}")
 
     response = client.interactions.create(
         model="gemini-3.8-flash-tts",
-        input=(
-            "Read this as a premium American financial documentary narrator. "
-            "Use a mature, deep, calm, authoritative American English voice. "
-            "Cinematic storytelling, natural pauses, clear pronunciation. "
-            "Do not sound like an advertisement.\n\n"
-            + chunk
-        ),
+        input=[{
+            "type": "user_input",
+            "content": [{
+                "type": "text",
+                "text": chunk,
+                "annotations": [{
+                    "type": "speech_metadata",
+                    "style": (
+                        "Mature, deep, authoritative American "
+                        "financial documentary narrator. "
+                        "Calm cinematic storytelling with "
+                        "natural pauses and clear pronunciation."
+                    )
+                }]
+            }]
+        }],
         response_format={"type": "audio"},
         generation_config={
             "speech_config": [
-                {"voice": "Charon"}
+                {"voice": "Gacrux"}
             ]
         }
     )
 
-    audio = base64.b64decode(response.output_audio.data)
-    audio_parts.append(audio)
+    wav_bytes = base64.b64decode(
+        response.output_audio.data
+    )
+
+    with wave.open(BytesIO(wav_bytes), "rb") as wav:
+        if wav.getnchannels() != 1 or wav.getframerate() != 24000:
+            raise ValueError("Unexpected audio format")
+
+        audio_frames.append(wav.readframes(wav.getnframes()))
 
 OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-with wave.open(str(OUTPUT_FILE), "wb") as wav:
-    wav.setnchannels(1)
-    wav.setsampwidth(2)
-    wav.setframerate(24000)
+with wave.open(str(OUTPUT_FILE), "wb") as output:
+    output.setnchannels(1)
+    output.setsampwidth(2)
+    output.setframerate(24000)
 
-    for part in audio_parts:
-        wav.writeframes(part)
+    for frames in audio_frames:
+        output.writeframes(frames)
 
-print(f"Voiceover created: {OUTPUT_FILE}")
+print("SUCCESS: Voiceover created!")
+print(OUTPUT_FILE)
