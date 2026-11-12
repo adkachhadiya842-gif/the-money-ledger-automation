@@ -1,17 +1,21 @@
 
 import os
 import re
+import json
+import base64
 import wave
+import urllib.request
+import urllib.error
 from pathlib import Path
-from google import genai
-from google.genai import types
 
-client = genai.Client(
-    api_key=os.environ["GEMINI_API_KEY"]
-)
+API_KEY = os.environ["GEMINI_API_KEY"]
+
+MODEL = "gemini-3.1-flash-tts-preview"
+VOICE = "Gacrux"
 
 INPUT_FILE = Path("output/script.txt")
 OUTPUT_FILE = Path("output/voiceover.wav")
+
 
 def clean_script(text):
     lines = []
@@ -61,6 +65,66 @@ def make_chunks(text, limit=2000):
     return chunks
 
 
+def generate_audio(chunk):
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/"
+        f"models/{MODEL}:generateContent"
+    )
+
+    payload = {
+        "contents": [{
+            "parts": [{
+                "text": (
+                    "Say in a mature, deep, authoritative "
+                    "American English financial documentary "
+                    "narrator voice. Use calm cinematic storytelling "
+                    "and natural pauses. Read only this transcript:\n\n"
+                    + chunk
+                )
+            }]
+        }],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {
+                        "voiceName": VOICE
+                    }
+                }
+            }
+        }
+    }
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": API_KEY
+        },
+        method="POST"
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            result = json.loads(response.read().decode("utf-8"))
+
+    except urllib.error.HTTPError as error:
+        details = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Google TTS API error {error.code}: {details}"
+        )
+
+    for candidate in result.get("candidates", []):
+        for part in candidate.get("content", {}).get("parts", []):
+            inline = part.get("inlineData")
+
+            if inline and inline.get("data"):
+                return base64.b64decode(inline["data"])
+
+    raise RuntimeError("Google API returned no audio data")
+
+
 if not INPUT_FILE.exists():
     raise FileNotFoundError("output/script.txt not found")
 
@@ -76,44 +140,7 @@ audio_parts = []
 
 for i, chunk in enumerate(chunks, 1):
     print(f"Generating voice {i}/{len(chunks)}")
-
-    response = client.models.generate_content(
-        model="gemini-3.1-flash-tts-preview",
-        contents=(
-            "Speak in a mature, deep, authoritative American "
-            "English financial documentary narrator voice. "
-            "Use calm cinematic storytelling and natural pauses. "
-            "Read only the following transcript:\n\n"
-            + chunk
-        ),
-        config=types.GenerateContentConfig(
-            response_modalities=["AUDIO"],
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Gacrux"
-                    )
-                )
-            )
-        )
-    )
-
-    audio_data = None
-
-    for candidate in response.candidates:
-        for part in candidate.content.parts:
-            if part.inline_data and part.inline_data.data:
-                audio_data = part.inline_data.data
-                break
-        if audio_data:
-            break
-
-    if not audio_data:
-        raise RuntimeError(
-            f"No audio returned for chunk {i}"
-        )
-
-    audio_parts.append(audio_data)
+    audio_parts.append(generate_audio(chunk))
 
 OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
