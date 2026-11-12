@@ -284,6 +284,7 @@ def main():
     print("SUCCESS: Voiceover created!")
     print("Output:", OUTPUT_FILE)
 
+    Path("output/tts_complete.txt").write_text("completed", encoding="utf-8")
 
 if __name__ == "__main__":
     main()
