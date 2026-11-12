@@ -9,16 +9,16 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_FILE = ROOT / "output" / "script.txt"
 VOICE_FILE = ROOT / "output" / "voiceover.wav"
 MUSIC_DIR = ROOT / "music"
-TEMP_DIR = ROOT / "output" / "bgm_segments"
+INTRO_FILE = MUSIC_DIR / "intro" / "Uprising.mp3"
 
+TEMP_DIR = ROOT / "output" / "bgm_segments"
 BGM_FILE = ROOT / "output" / "background_music.wav"
 FINAL_FILE = ROOT / "output" / "final_audio.wav"
 
-# Background music volume.
-# Keep it low so narration stays clear.
-BGM_VOLUME = 0.12
-
-# Fade duration in seconds
+# Audio settings
+BGM_VOLUME = 0.10
+INTRO_VOLUME = 0.18
+INTRO_SECONDS = 10
 FADE_SECONDS = 1.5
 
 MOOD_KEYWORDS = {
@@ -28,7 +28,7 @@ MOOD_KEYWORDS = {
     ],
     "suspense": [
         "warning", "danger", "risk", "threat", "investigation",
-        "question", "uncertain", "collapse", "unexpected"
+        "question", "uncertain", "unexpected"
     ],
     "crisis": [
         "crisis", "crash", "bankruptcy", "debt", "recession",
@@ -47,7 +47,6 @@ MOOD_KEYWORDS = {
 
 
 def run_command(command):
-    """Run FFmpeg and show useful errors."""
     result = subprocess.run(
         command,
         stdout=subprocess.PIPE,
@@ -67,14 +66,12 @@ def read_script():
 
     text = SCRIPT_FILE.read_text(encoding="utf-8")
 
-    # Remove fact-check notes and everything after them
     text = re.split(
         r"FACT[- ]CHECK NOTES",
         text,
         flags=re.IGNORECASE
     )[0]
 
-    # Remove common non-narration labels
     text = re.sub(
         r"(?im)^\s*(TITLE|VISUAL|B-ROLL|ON-SCREEN|"
         r"EDITOR NOTE|SOURCE NOTE|GRAPHICS|MUSIC)\s*:.*$",
@@ -90,7 +87,6 @@ def read_script():
         if p.strip()
     ]
 
-    # Remove a short opening title line if present
     if paragraphs and len(paragraphs[0].split()) < 12:
         paragraphs = paragraphs[1:]
 
@@ -102,44 +98,38 @@ def read_script():
 
 def detect_mood(paragraph):
     text = paragraph.lower()
-    scores = {}
 
-    for mood, keywords in MOOD_KEYWORDS.items():
-        scores[mood] = sum(
-            text.count(keyword)
-            for keyword in keywords
-        )
+    scores = {
+        mood: sum(text.count(word) for word in keywords)
+        for mood, keywords in MOOD_KEYWORDS.items()
+    }
 
     best_mood = max(scores, key=scores.get)
 
-    if scores[best_mood] == 0:
-        return "neutral"
-
-    return best_mood
+    return best_mood if scores[best_mood] > 0 else "neutral"
 
 
 def make_scenes(paragraphs):
-    """Combine adjacent paragraphs with the same mood."""
     scenes = []
 
     for paragraph in paragraphs:
         mood = detect_mood(paragraph)
+        words = len(paragraph.split())
 
         if scenes and scenes[-1]["mood"] == mood:
             scenes[-1]["text"] += "\n\n" + paragraph
-            scenes[-1]["words"] += len(paragraph.split())
+            scenes[-1]["words"] += words
         else:
             scenes.append({
                 "mood": mood,
                 "text": paragraph,
-                "words": len(paragraph.split())
+                "words": words
             })
 
     return scenes
 
 
 def get_audio_duration():
-    """Read narration duration using FFprobe."""
     command = [
         "ffprobe",
         "-v", "error",
@@ -162,6 +152,7 @@ def find_music(mood):
     folder = MUSIC_DIR / mood
 
     files = []
+
     if folder.exists():
         files = [
             p for p in folder.iterdir()
@@ -169,12 +160,12 @@ def find_music(mood):
         ]
 
     if not files and mood != "neutral":
+        print(f"No {mood} music found. Using neutral music.")
         return find_music("neutral")
 
     if not files:
         raise FileNotFoundError(
-            f"No music files found in {folder}. "
-            "Upload at least one licensed music track."
+            f"No music files found in {folder}"
         )
 
     return random.choice(files)
@@ -185,7 +176,6 @@ def create_music_segment(track, output, duration):
         raise ValueError("Invalid music segment duration")
 
     fade = min(FADE_SECONDS, duration / 3)
-
     fade_out_start = max(0, duration - fade)
 
     audio_filter = (
@@ -214,7 +204,9 @@ def join_segments(segment_files):
 
     with concat_file.open("w", encoding="utf-8") as file:
         for segment in segment_files:
-            safe_path = segment.resolve().as_posix().replace("'", "'\\''")
+            safe_path = (
+                segment.resolve().as_posix().replace("'", "'\\''")
+            )
             file.write(f"file '{safe_path}'\n")
 
     command = [
@@ -229,19 +221,62 @@ def join_segments(segment_files):
     run_command(command)
 
 
-def mix_voice_and_music():
+def add_intro_music(total_duration):
+    """Mix the 10-second Uprising intro over the mood-based BGM."""
+
+    if not INTRO_FILE.exists():
+        raise FileNotFoundError(
+            f"Intro music not found: {INTRO_FILE}\n"
+            "Check music/intro/Uprising.mp3"
+        )
+
+    intro_duration = min(INTRO_SECONDS, total_duration)
+
+    intro_filter = (
+        f"[0:a]volume=1.0[base];"
+        f"[1:a]atrim=duration={intro_duration},"
+        f"asetpts=PTS-STARTPTS,"
+        f"volume={INTRO_VOLUME},"
+        f"afade=t=in:st=0:d=1.5,"
+        f"afade=t=out:st={max(0, intro_duration - 2):.2f}:d=2"
+        f"[intro];"
+        f"[base][intro]amix=inputs=2:"
+        f"duration=first:normalize=0[out]"
+    )
+
+    command = [
+        "ffmpeg", "-y",
+        "-i", str(BGM_FILE),
+        "-i", str(INTRO_FILE),
+        "-filter_complex", intro_filter,
+        "-map", "[out]",
+        "-ar", "44100",
+        "-ac", "2",
+        "-c:a", "pcm_s16le",
+        str(TEMP_DIR / "bgm_with_intro.wav")
+    ]
+
+    run_command(command)
+
+    return TEMP_DIR / "bgm_with_intro.wav"
+
+
+def mix_voice_and_music(background_file):
     command = [
         "ffmpeg", "-y",
         "-i", str(VOICE_FILE),
-        "-i", str(BGM_FILE),
+        "-i", str(background_file),
         "-filter_complex",
         (
+            "[0:a]volume=1.0[voice];"
             "[1:a]volume=1.0[bg];"
-            "[0:a][bg]amix=inputs=2:"
+            "[voice][bg]amix=inputs=2:"
             "duration=first:dropout_transition=2:"
             "normalize=0[out]"
         ),
         "-map", "[out]",
+        "-ar", "44100",
+        "-ac", "2",
         "-c:a", "pcm_s16le",
         str(FINAL_FILE)
     ]
@@ -255,6 +290,11 @@ def main():
             "Voiceover not found. Generate voiceover first."
         )
 
+    if not INTRO_FILE.exists():
+        raise FileNotFoundError(
+            "Upload Uprising.mp3 to music/intro/ first."
+        )
+
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     BGM_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -264,20 +304,21 @@ def main():
     total_duration = get_audio_duration()
     total_words = sum(scene["words"] for scene in scenes)
 
+    if total_words == 0:
+        raise ValueError("Script contains no usable narration words.")
+
     print("Narration duration:", round(total_duration, 2), "seconds")
     print("Detected scenes:", len(scenes))
+    print("Intro track:", INTRO_FILE.name)
 
     segment_files = []
-
     elapsed = 0.0
 
     for index, scene in enumerate(scenes, 1):
         if index == len(scenes):
             duration = total_duration - elapsed
         else:
-            duration = (
-                total_duration * scene["words"] / total_words
-            )
+            duration = total_duration * scene["words"] / total_words
 
         elapsed += duration
 
@@ -296,11 +337,14 @@ def main():
         create_music_segment(track, output, duration)
         segment_files.append(output)
 
-    print("Joining background music...")
+    print("Joining mood-based background music...")
     join_segments(segment_files)
 
+    print("Adding cinematic intro...")
+    background_file = add_intro_music(total_duration)
+
     print("Mixing narration and background music...")
-    mix_voice_and_music()
+    mix_voice_and_music(background_file)
 
     print("SUCCESS: Automatic BGM complete!")
     print("Final audio:", FINAL_FILE)
