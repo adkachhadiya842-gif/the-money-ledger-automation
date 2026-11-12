@@ -29,8 +29,17 @@ jobs:
       - name: Create documentary script
         run: python scripts/generate_script.py
 
+      - name: Generate documentary voiceover
+        run: python scripts/generate_voice.py
+
       - name: Save generated script
         uses: actions/upload-artifact@v7
         with:
           name: money-ledger-script
           path: output/script.txt
+
+      - name: Save generated voiceover
+        uses: actions/upload-artifact@v7
+        with:
+          name: money-ledger-voiceover
+          path: output/voiceover.wav
