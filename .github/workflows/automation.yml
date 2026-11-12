@@ -53,6 +53,12 @@ jobs:
           name: money-ledger-voiceover
           path: output/voiceover.wav
 
+      - name: Save background music
+        uses: actions/upload-artifact@v7
+        with:
+          name: money-ledger-background-music
+          path: output/background_music.wav
+
       - name: Save final audio with BGM
         uses: actions/upload-artifact@v7
         with:
