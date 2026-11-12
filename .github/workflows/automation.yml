@@ -24,14 +24,22 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Gemini library
+      - name: Install Python libraries
         run: pip install google-genai
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
 
       - name: Create documentary script
         run: python scripts/generate_script.py
 
       - name: Generate documentary voiceover
         run: python scripts/generate_voice.py
+
+      - name: Generate automatic background music
+        run: python scripts/build_bgm.py
 
       - name: Save generated script
         uses: actions/upload-artifact@v7
@@ -44,3 +52,9 @@ jobs:
         with:
           name: money-ledger-voiceover
           path: output/voiceover.wav
+
+      - name: Save final audio with BGM
+        uses: actions/upload-artifact@v7
+        with:
+          name: money-ledger-final-audio
+          path: output/final_audio.wav
