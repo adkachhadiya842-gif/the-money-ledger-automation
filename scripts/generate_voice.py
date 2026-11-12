@@ -3,7 +3,6 @@ import os
 import re
 import base64
 import wave
-from io import BytesIO
 from pathlib import Path
 from google import genai
 
@@ -15,7 +14,7 @@ INPUT_FILE = Path("output/script.txt")
 OUTPUT_FILE = Path("output/voiceover.wav")
 
 def clean_script(text):
-    result = []
+    lines = []
 
     for line in text.splitlines():
         line = line.strip()
@@ -41,11 +40,11 @@ def clean_script(text):
         line = re.sub(r"^\*\*NARRATOR:\*\*\s*", "", line, flags=re.I)
         line = re.sub(r"^NARRATOR:\s*", "", line, flags=re.I)
 
-        result.append(line)
+        lines.append(line)
 
-    return "\n".join(result)
+    return "\n".join(lines)
 
-def make_chunks(text, limit=2500):
+def make_chunks(text, limit=2000):
     sentences = re.split(r'(?<=[.!?])\s+', text)
     chunks = []
     current = ""
@@ -73,29 +72,20 @@ if not script:
     raise ValueError("No narration text found")
 
 chunks = make_chunks(script)
-audio_frames = []
+audio_parts = []
 
 for i, chunk in enumerate(chunks, 1):
     print(f"Generating voice {i}/{len(chunks)}")
 
     response = client.interactions.create(
-        model="gemini-3.8-flash-tts",
-        input=[{
-            "type": "user_input",
-            "content": [{
-                "type": "text",
-                "text": chunk,
-                "annotations": [{
-                    "type": "speech_metadata",
-                    "style": (
-                        "Mature, deep, authoritative American "
-                        "financial documentary narrator. "
-                        "Calm cinematic storytelling with "
-                        "natural pauses and clear pronunciation."
-                    )
-                }]
-            }]
-        }],
+        model="gemini-3.1-flash-tts-preview",
+        input=(
+            "Say in a mature, deep, authoritative American English "
+            "financial documentary narrator voice. "
+            "Use calm cinematic storytelling and natural pauses. "
+            "Read only the transcript below:\n\n"
+            + chunk
+        ),
         response_format={"type": "audio"},
         generation_config={
             "speech_config": [
@@ -104,25 +94,22 @@ for i, chunk in enumerate(chunks, 1):
         }
     )
 
-    wav_bytes = base64.b64decode(
-        response.output_audio.data
+    if not response.output_audio:
+        raise RuntimeError("No audio returned by Gemini")
+
+    audio_parts.append(
+        base64.b64decode(response.output_audio.data)
     )
-
-    with wave.open(BytesIO(wav_bytes), "rb") as wav:
-        if wav.getnchannels() != 1 or wav.getframerate() != 24000:
-            raise ValueError("Unexpected audio format")
-
-        audio_frames.append(wav.readframes(wav.getnframes()))
 
 OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-with wave.open(str(OUTPUT_FILE), "wb") as output:
-    output.setnchannels(1)
-    output.setsampwidth(2)
-    output.setframerate(24000)
+with wave.open(str(OUTPUT_FILE), "wb") as wav:
+    wav.setnchannels(1)
+    wav.setsampwidth(2)
+    wav.setframerate(24000)
 
-    for frames in audio_frames:
-        output.writeframes(frames)
+    for part in audio_parts:
+        wav.writeframes(part)
 
 print("SUCCESS: Voiceover created!")
 print(OUTPUT_FILE)
