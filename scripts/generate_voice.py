@@ -122,7 +122,27 @@ def generate_audio(chunk):
             if inline and inline.get("data"):
                 return base64.b64decode(inline["data"])
 
-    raise RuntimeError("Google API returned no audio data")
+    
+print("DEBUG: Response keys:", list(result.keys()))
+print("DEBUG: Prompt feedback:", result.get("promptFeedback"))
+
+for index, candidate in enumerate(result.get("candidates", [])):
+    print("DEBUG: Candidate:", index)
+    print("DEBUG: Finish reason:", candidate.get("finishReason"))
+
+    for part in candidate.get("content", {}).get("parts", []):
+        print("DEBUG: Part keys:", list(part.keys()))
+
+        if "text" in part:
+            print("DEBUG: Text response:", part["text"][:500])
+
+        if "inlineData" in part:
+            inline = part["inlineData"]
+            print("DEBUG: Audio MIME:", inline.get("mimeType"))
+            print("DEBUG: Audio data present:", bool(inline.get("data")))
+
+raise RuntimeError("Diagnostic complete - audio data not found")
+
 
 
 if not INPUT_FILE.exists():
