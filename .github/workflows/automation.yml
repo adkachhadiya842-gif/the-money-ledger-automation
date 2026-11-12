@@ -32,34 +32,74 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      - name: Create documentary script
-        run: python scripts/generate_script.py
+      - name: Restore voiceover checkpoints
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            output/script.txt
+            output/tts_chunks/
+            output/tts_complete.txt
+          key: money-ledger-tts-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            money-ledger-tts-${{ github.ref_name }}-
+
+      - name: Prepare previous run
+        run: |
+          if [ -f output/tts_complete.txt ]; then
+            echo "Previous voiceover completed. Starting a new video."
+            rm -rf output/tts_chunks
+            rm -f output/script.txt output/tts_complete.txt
+          fi
+          mkdir -p output
+
+      - name: Create or resume documentary script
+        run: |
+          if [ ! -f output/script.txt ]; then
+            python scripts/generate_script.py
+          else
+            echo "Using saved script to resume voiceover."
+          fi
 
       - name: Generate documentary voiceover
         run: python scripts/generate_voice.py
 
+      - name: Save voiceover checkpoints
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            output/script.txt
+            output/tts_chunks/
+            output/tts_complete.txt
+          key: money-ledger-tts-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Generate automatic background music
+        if: success()
         run: python scripts/build_bgm.py
 
       - name: Save generated script
+        if: success()
         uses: actions/upload-artifact@v7
         with:
           name: money-ledger-script
           path: output/script.txt
 
       - name: Save generated voiceover
+        if: success()
         uses: actions/upload-artifact@v7
         with:
           name: money-ledger-voiceover
           path: output/voiceover.wav
 
       - name: Save background music
+        if: success()
         uses: actions/upload-artifact@v7
         with:
           name: money-ledger-background-music
           path: output/background_music.wav
 
       - name: Save final audio with BGM
+        if: success()
         uses: actions/upload-artifact@v7
         with:
           name: money-ledger-final-audio
