@@ -1,10 +1,10 @@
 
 import os
 import re
-import base64
 import wave
 from pathlib import Path
 from google import genai
+from google.genai import types
 
 client = genai.Client(
     api_key=os.environ["GEMINI_API_KEY"]
@@ -19,21 +19,19 @@ def clean_script(text):
     for line in text.splitlines():
         line = line.strip()
 
-        if not line:
+        if not line or line.startswith("#"):
             continue
 
         if re.match(
-            r"^(visual|b-roll|on-screen|fact-check|fact check|"
-            r"editor note|source note|graphics|music|sound effect)\s*:",
+            r"^(visual|b-roll|on-screen|fact-check|"
+            r"fact check|editor note|source note|graphics|"
+            r"music|sound effect)\s*:",
             line,
             re.I
         ):
             continue
 
         if line.startswith("[VISUAL") or line.startswith("[B-ROLL"):
-            continue
-
-        if line.startswith("#"):
             continue
 
         line = re.sub(r"\*\*(.*?)\*\*", r"\1", line)
@@ -43,6 +41,7 @@ def clean_script(text):
         lines.append(line)
 
     return "\n".join(lines)
+
 
 def make_chunks(text, limit=2000):
     sentences = re.split(r'(?<=[.!?])\s+', text)
@@ -61,6 +60,7 @@ def make_chunks(text, limit=2000):
 
     return chunks
 
+
 if not INPUT_FILE.exists():
     raise FileNotFoundError("output/script.txt not found")
 
@@ -77,29 +77,43 @@ audio_parts = []
 for i, chunk in enumerate(chunks, 1):
     print(f"Generating voice {i}/{len(chunks)}")
 
-    response = client.interactions.create(
+    response = client.models.generate_content(
         model="gemini-3.1-flash-tts-preview",
-        input=(
-            "Say in a mature, deep, authoritative American English "
-            "financial documentary narrator voice. "
+        contents=(
+            "Speak in a mature, deep, authoritative American "
+            "English financial documentary narrator voice. "
             "Use calm cinematic storytelling and natural pauses. "
-            "Read only the transcript below:\n\n"
+            "Read only the following transcript:\n\n"
             + chunk
         ),
-        response_format={"type": "audio"},
-        generation_config={
-            "speech_config": [
-                {"voice": "Gacrux"}
-            ]
-        }
+        config=types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                        voice_name="Gacrux"
+                    )
+                )
+            )
+        )
     )
 
-    if not response.output_audio:
-        raise RuntimeError("No audio returned by Gemini")
+    audio_data = None
 
-    audio_parts.append(
-        base64.b64decode(response.output_audio.data)
-    )
+    for candidate in response.candidates:
+        for part in candidate.content.parts:
+            if part.inline_data and part.inline_data.data:
+                audio_data = part.inline_data.data
+                break
+        if audio_data:
+            break
+
+    if not audio_data:
+        raise RuntimeError(
+            f"No audio returned for chunk {i}"
+        )
+
+    audio_parts.append(audio_data)
 
 OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
