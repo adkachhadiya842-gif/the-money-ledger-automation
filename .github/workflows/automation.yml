@@ -1,8 +1,18 @@
-
 name: The Money Ledger Automation
 
 on:
   workflow_dispatch:
+    inputs:
+      bgm_enabled:
+        description: "Background music ON/OFF"
+        required: true
+        type: boolean
+        default: true
+      intro_enabled:
+        description: "Intro music ON/OFF"
+        required: true
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -14,6 +24,8 @@ jobs:
     env:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      BGM_ENABLED: ${{ inputs.bgm_enabled }}
+      INTRO_ENABLED: ${{ inputs.intro_enabled }}
 
     steps:
       - name: Download project files
@@ -98,7 +110,7 @@ jobs:
           name: money-ledger-background-music
           path: output/background_music.wav
 
-      - name: Save final audio with BGM
+      - name: Save final audio
         if: success()
         uses: actions/upload-artifact@v7
         with:
